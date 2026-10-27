@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>HYSC Camera Test</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; font: 18px Arial, sans-serif; color: #20352e; background: #f3f6f5; }
+    main { max-width: 700px; margin: auto; padding: 24px; background: white; border: 1px solid #d8e1dc; border-radius: 12px; }
+    h1 { margin-top: 0; font-size: 28px; }
+    p { line-height: 1.5; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
+    button { min-height: 52px; padding: 12px 20px; font: inherit; border: 1px solid #174b38; border-radius: 8px; background: #174b38; color: white; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    #stop { color: #174b38; background: white; }
+    video { display: block; width: 100%; max-height: 65vh; background: #111; border-radius: 8px; }
+    :focus-visible { outline: 3px solid #be8800; outline-offset: 3px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>HYSC Camera Test</h1>
+    <p><strong>Camera test only.</strong> This page does not read badges, sign anyone in or change hours. Video stays on this device. Nothing is recorded or uploaded.</p>
+    <div class="actions">
+      <button id="start" type="button" disabled>Start camera</button>
+      <button id="stop" type="button" disabled>Stop camera</button>
+    </div>
+    <p id="status" role="status" aria-live="polite">Checking camera support…</p>
+    <video id="video" autoplay muted playsinline hidden></video>
+    <p>Version: camera-test-1</p>
+  </main>
+  <script>
+    (() => {
+      'use strict';
+      const start = document.getElementById('start');
+      const stop = document.getElementById('stop');
+      const status = document.getElementById('status');
+      const video = document.getElementById('video');
+      const supported = !!(
+        window.isSecureContext &&
+        navigator.mediaDevices &&
+        navigator.mediaDevices.getUserMedia
+      );
+      let stream = null;
+      let generation = 0;
+
+      function stopCamera(message) {
+        generation++;
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+        stream = null;
+        video.pause();
+        video.srcObject = null;
+        video.hidden = true;
+        start.disabled = !supported;
+        stop.disabled = true;
+        status.textContent = message;
+      }
+
+      start.addEventListener('click', async () => {
+        const request = ++generation;
+        start.disabled = true;
+        stop.disabled = false;
+        status.textContent =
+          'Waiting for camera permission. Choose Allow if asked.';
+
+        let opened = null;
+
+        try {
+          opened = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              facingMode: { ideal: 'environment' }
+            }
+          });
+
+          if (request !== generation || document.hidden) {
+            opened.getTracks().forEach(track => track.stop());
+            return;
+          }
+
+          stream = opened;
+
+          stream.getVideoTracks().forEach(track => {
+            track.addEventListener('ended', () => {
+              if (request === generation) {
+                stopCamera(
+                  'Camera disconnected. You can try again.'
+                );
+              }
+            });
+          });
+
+          video.srcObject = stream;
+          video.hidden = false;
+          await video.play();
+
+          if (request !== generation) return;
+
+          status.textContent =
+            'Camera is working. Click Stop camera when finished.';
+
+        } catch (error) {
+          if (request !== generation) {
+            if (opened) {
+              opened.getTracks().forEach(track => track.stop());
+            }
+            return;
+          }
+
+          const messages = {
+            NotAllowedError:
+              'Camera access was denied or blocked. Check this site’s camera permission.',
+            NotFoundError:
+              'No camera was found on this device.',
+            NotReadableError:
+              'The camera could not start. Close other apps using it and try again.',
+            SecurityError:
+              'The browser blocked camera access on this page.'
+          };
+
+          stopCamera(
+            messages[error && error.name] ||
+            'Camera could not start. Error: ' +
+            (error && error.name || 'UnknownError')
+          );
+        }
+      });
+
+      stop.addEventListener('click', () => {
+        stopCamera('Camera stopped.');
+      });
+
+      window.addEventListener('pagehide', () => {
+        stopCamera('Camera stopped.');
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          stopCamera(
+            'Camera stopped while this page was hidden.'
+          );
+        }
+      });
+
+      start.disabled = !supported;
+
+      status.textContent = supported
+        ? 'Ready. Click Start camera.'
+        : 'Camera access requires a supported browser and an HTTPS page. Open the published website directly.';
+    })();
+  </script>
+</body>
+</html>
