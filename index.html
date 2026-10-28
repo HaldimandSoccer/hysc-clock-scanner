@@ -4,68 +4,306 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>HYSC Camera Test</title>
+  <title>HYSC TEST QR Reader</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; padding: 24px; font: 18px Arial, sans-serif; color: #20352e; background: #f3f6f5; }
+    body { margin: 0; padding: 20px; font: 18px Arial, sans-serif; color: #20352e; background: #f3f6f5; }
     main { max-width: 700px; margin: auto; padding: 24px; background: white; border: 1px solid #d8e1dc; border-radius: 12px; }
     h1 { margin-top: 0; font-size: 28px; }
+    h2 { margin-top: 0; font-size: 23px; }
     p { line-height: 1.5; }
+    .notice, #result { padding: 18px; border: 1px solid #d7b653; border-radius: 8px; background: #fff4cf; }
     .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
-    button { min-height: 52px; padding: 12px 20px; font: inherit; border: 1px solid #174b38; border-radius: 8px; background: #174b38; color: white; cursor: pointer; }
+    button { min-height: 52px; padding: 12px 18px; font: inherit; border: 1px solid #174b38; border-radius: 8px; background: #174b38; color: white; cursor: pointer; }
     button:disabled { opacity: .5; cursor: default; }
-    #stop { color: #174b38; background: white; }
+    .secondary { color: #174b38; background: white; }
     video { display: block; width: 100%; max-height: 65vh; background: #111; border-radius: 8px; }
+    #result { margin-top: 20px; }
     :focus-visible { outline: 3px solid #be8800; outline-offset: 3px; }
     [hidden] { display: none !important; }
+    @media(max-width: 500px) { body { padding: 12px; } main { padding: 18px; } }
   </style>
 </head>
 <body>
   <main>
-    <h1>HYSC Camera Test</h1>
-    <p><strong>Camera test only.</strong> This page does not read badges, sign anyone in or change hours. Video stays on this device. Nothing is recorded or uploaded.</p>
+    <h1>HYSC TEST QR Reader</h1>
+
+    <p class="notice">
+      <strong>Reading test only.</strong>
+      This page reads fictional HYSC TEST badges.
+      It cannot check whether a badge is current or revoked.
+      It does not sign anyone in or change hours.
+    </p>
+
+    <p>
+      Keep one complete QR code in view, with some white space
+      around it. Hold the badge steady and move it slightly
+      closer or farther away if needed.
+    </p>
+
     <div class="actions">
-      <button id="start" type="button" disabled>Start camera</button>
-      <button id="stop" type="button" disabled>Stop camera</button>
+      <button id="start" type="button" disabled>
+        Start scanning
+      </button>
+      <button id="stop" class="secondary" type="button" disabled>
+        Stop camera
+      </button>
     </div>
-    <p id="status" role="status" aria-live="polite">Checking camera support…</p>
+
+    <p id="status" role="status" aria-live="polite">
+      Loading QR reader…
+    </p>
+
     <video id="video" autoplay muted playsinline hidden></video>
-    <p>Version: camera-test-1</p>
+
+    <section id="result" tabindex="-1"
+             aria-labelledby="resultHeading" hidden>
+      <h2 id="resultHeading"></h2>
+      <p id="person"></p>
+      <p id="details"></p>
+      <button id="clear" class="secondary" type="button">
+        Clear result
+      </button>
+    </section>
+
+    <p>
+      Video is processed on this device. Nothing is recorded
+      or uploaded. Badge security codes are not displayed or saved.
+    </p>
+
+    <p>Version: qr-reader-test-1</p>
   </main>
+
+  <script
+    src="https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.2/dist/iife/reader/index.js"
+    integrity="sha384-mCq4mFkBTwOBtKJLROieg5Tl2bmtoLhYuJtYTCzokRTkIFAYWe8QpvfoQxXmFVqC"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"></script>
+
   <script>
     (() => {
       'use strict';
-      const start = document.getElementById('start');
-      const stop = document.getElementById('stop');
-      const status = document.getElementById('status');
-      const video = document.getElementById('video');
+
+      const el = id => document.getElementById(id);
+      const video = el('video');
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext(
+        '2d', { willReadFrequently: true }
+      );
+
       const supported = !!(
         window.isSecureContext &&
+        context &&
         navigator.mediaDevices &&
         navigator.mediaDevices.getUserMedia
       );
+
+      const options = {
+        formats: ['QRCode'],
+        tryHarder: true,
+        tryRotate: true,
+        tryInvert: true,
+        maxNumberOfSymbols: 4
+      };
+
+      let ready = false;
       let stream = null;
       let generation = 0;
+      let timer = null;
+      let decoding = false;
+
+      function clearResult() {
+        el('result').hidden = true;
+        ['resultHeading', 'person', 'details'].forEach(id => {
+          el(id).textContent = '';
+        });
+      }
 
       function stopCamera(message) {
         generation++;
+        clearTimeout(timer);
+        timer = null;
+
         if (stream) {
           stream.getTracks().forEach(track => track.stop());
         }
+
         stream = null;
         video.pause();
         video.srcObject = null;
         video.hidden = true;
-        start.disabled = !supported;
-        stop.disabled = true;
-        status.textContent = message;
+        canvas.width = canvas.height = 0;
+        el('start').disabled = !ready || !supported;
+        el('stop').disabled = true;
+
+        if (message) el('status').textContent = message;
       }
 
-      start.addEventListener('click', async () => {
+      function badgeIdFromText(raw) {
+        const prefix = 'HYSC_CLOCK_TEST_QR_V1:';
+
+        if (
+          typeof raw !== 'string' ||
+          raw.length > 2000 ||
+          !raw.startsWith(prefix)
+        ) {
+          return null;
+        }
+
+        try {
+          const badge = JSON.parse(raw.slice(prefix.length));
+
+          if (
+            !badge ||
+            typeof badge !== 'object' ||
+            Array.isArray(badge) ||
+            Object.keys(badge).length !== 3 ||
+            typeof badge.employeeId !== 'string' ||
+            !/^SAMPLE-00[1-4]$/.test(badge.employeeId) ||
+            typeof badge.badgeId !== 'string' ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(badge.badgeId) ||
+            typeof badge.token !== 'string' ||
+            !/^[0-9a-f]{64}$/.test(badge.token)
+          ) {
+            return null;
+          }
+
+          return badge.employeeId;
+
+        } catch (error) {
+          return null;
+        }
+      }
+
+      function showResult(heading, person, details) {
+        stopCamera('Reading finished. Camera stopped.');
+        el('resultHeading').textContent = heading;
+        el('person').textContent = person;
+        el('details').textContent = details;
+        el('result').hidden = false;
+        el('result').focus({ preventScroll: true });
+        el('result').scrollIntoView({ block: 'nearest' });
+      }
+
+      function schedule(request) {
+        if (
+          request === generation &&
+          stream &&
+          !document.hidden
+        ) {
+          timer = setTimeout(() => scanFrame(request), 250);
+        }
+      }
+
+      async function scanFrame(request) {
+        if (
+          request !== generation ||
+          !stream ||
+          document.hidden
+        ) {
+          return;
+        }
+
+        if (
+          decoding ||
+          video.readyState < 2 ||
+          !video.videoWidth ||
+          !video.videoHeight
+        ) {
+          schedule(request);
+          return;
+        }
+
+        decoding = true;
+
+        try {
+          const scale = Math.min(
+            1,
+            1600 / Math.max(
+              video.videoWidth, video.videoHeight
+            )
+          );
+
+          canvas.width = Math.max(
+            1, Math.round(video.videoWidth * scale)
+          );
+
+          canvas.height = Math.max(
+            1, Math.round(video.videoHeight * scale)
+          );
+
+          context.drawImage(
+            video, 0, 0, canvas.width, canvas.height
+          );
+
+          const pixels = context.getImageData(
+            0, 0, canvas.width, canvas.height
+          );
+
+          const results =
+            await window.ZXingWASM.readBarcodes(pixels, options);
+
+          if (
+            request !== generation ||
+            document.hidden
+          ) {
+            return;
+          }
+
+          if (results.length > 1) {
+            showResult(
+              'More than one QR code found',
+              '',
+              'Show just one badge, then tap Start scanning again.'
+            );
+            return;
+          }
+
+          if (results.length === 1) {
+            const id = badgeIdFromText(results[0].text);
+
+            showResult(
+              id
+                ? 'HYSC TEST badge read'
+                : 'QR code not recognised',
+              id ? 'Employee ID: ' + id : '',
+              id
+                ? 'The code was read successfully. Its authenticity and current or revoked status have NOT been checked. No session or time entry was created.'
+                : 'This code does not match the fictional HYSC TEST badge format. It was not opened or followed.'
+            );
+
+            return;
+          }
+
+        } catch (error) {
+          if (request === generation) {
+            stopCamera(
+              'QR reading failed. Tap Start scanning to try again.'
+            );
+          }
+
+        } finally {
+          decoding = false;
+          schedule(request);
+        }
+      }
+
+      el('start').addEventListener('click', async () => {
+        if (
+          !ready ||
+          !supported ||
+          el('start').disabled ||
+          document.hidden
+        ) {
+          return;
+        }
+
+        clearResult();
+
         const request = ++generation;
-        start.disabled = true;
-        stop.disabled = false;
-        status.textContent =
+        el('start').disabled = true;
+        el('stop').disabled = false;
+        el('status').textContent =
           'Waiting for camera permission. Choose Allow if asked.';
 
         let opened = null;
@@ -74,11 +312,16 @@
           opened = await navigator.mediaDevices.getUserMedia({
             audio: false,
             video: {
-              facingMode: { ideal: 'environment' }
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 }
             }
           });
 
-          if (request !== generation || document.hidden) {
+          if (
+            request !== generation ||
+            document.hidden
+          ) {
             opened.getTracks().forEach(track => track.stop());
             return;
           }
@@ -88,9 +331,7 @@
           stream.getVideoTracks().forEach(track => {
             track.addEventListener('ended', () => {
               if (request === generation) {
-                stopCamera(
-                  'Camera disconnected. You can try again.'
-                );
+                stopCamera('Camera disconnected. Try again.');
               }
             });
           });
@@ -101,8 +342,10 @@
 
           if (request !== generation) return;
 
-          status.textContent =
-            'Camera is working. Click Stop camera when finished.';
+          el('status').textContent =
+            'Scanning… Hold one complete QR badge in view.';
+
+          schedule(request);
 
         } catch (error) {
           if (request !== generation) {
@@ -118,40 +361,73 @@
             NotFoundError:
               'No camera was found on this device.',
             NotReadableError:
-              'The camera could not start. Close other apps using it and try again.',
-            SecurityError:
-              'The browser blocked camera access on this page.'
+              'The camera could not start. Close other apps using it and try again.'
           };
 
           stopCamera(
             messages[error && error.name] ||
-            'Camera could not start. Error: ' +
-            (error && error.name || 'UnknownError')
+            'Camera could not start. Try again.'
           );
         }
       });
 
-      stop.addEventListener('click', () => {
+      el('stop').addEventListener('click', () => {
         stopCamera('Camera stopped.');
       });
 
-      window.addEventListener('pagehide', () => {
-        stopCamera('Camera stopped.');
+      el('clear').addEventListener('click', () => {
+        clearResult();
+        el('status').textContent =
+          'Result cleared. Tap Start scanning for another badge.';
       });
+
+      function leave() {
+        stopCamera(
+          ready
+            ? 'Camera stopped. Tap Start scanning when ready.'
+            : 'Loading QR reader…'
+        );
+        clearResult();
+      }
+
+      window.addEventListener('pagehide', leave);
 
       document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-          stopCamera(
-            'Camera stopped while this page was hidden.'
-          );
-        }
+        if (document.hidden) leave();
       });
 
-      start.disabled = !supported;
+      async function initialise() {
+        try {
+          if (!supported) {
+            throw new Error('Camera support unavailable');
+          }
 
-      status.textContent = supported
-        ? 'Ready. Click Start camera.'
-        : 'Camera access requires a supported browser and an HTTPS page. Open the published website directly.';
+          if (!window.ZXingWASM) {
+            throw new Error('Reader unavailable');
+          }
+
+          await window.ZXingWASM.prepareZXingModule({
+            overrides: {
+              locateFile: path =>
+                'https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.2/dist/reader/' +
+                path
+            },
+            fireImmediately: true
+          });
+
+          ready = true;
+          el('start').disabled = false;
+          el('status').textContent =
+            'Ready. Tap Start scanning.';
+
+        } catch (error) {
+          el('status').textContent = supported
+            ? 'QR reader could not load. Check your internet connection and reload this page.'
+            : 'Camera access requires a supported browser and an HTTPS page. Open the published website directly.';
+        }
+      }
+
+      initialise();
     })();
   </script>
 </body>
