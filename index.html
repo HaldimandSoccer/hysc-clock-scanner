@@ -29,11 +29,20 @@
     <h1>HYSC TEST QR Reader</h1>
 
     <p class="notice">
-      <strong>Reading test only.</strong>
-      This page reads fictional HYSC TEST badges.
-      It cannot check whether a badge is current or revoked.
-      It does not sign anyone in or change hours.
+      <strong>HYSC TEST scanner.</strong>
+      Open this page from the Google admin app to send a badge
+      for verification. This page alone cannot confirm whether
+      a badge is current or revoked. No sign-in or time entry
+      is created.
     </p>
+
+    <p id="connection" role="status">
+      Standalone reading test. Google verification is not connected.
+    </p>
+
+    <button id="return" class="secondary" type="button" hidden>
+      Return to Google badge check
+    </button>
 
     <p>
       Keep one complete QR code in view, with some white space
@@ -67,11 +76,13 @@
     </section>
 
     <p>
-      Video is processed on this device. Nothing is recorded
-      or uploaded. Badge security codes are not displayed or saved.
+      Video is processed on this device. Video is not recorded
+      or uploaded. When connected from the admin app, the decoded
+      badge code is sent to that app for verification.
+      Badge security codes are not displayed or saved.
     </p>
 
-    <p>Version: qr-reader-test-1</p>
+    <p>Version: qr-reader-connected-1</p>
   </main>
 
   <script
@@ -87,6 +98,7 @@
       const el = id => document.getElementById(id);
       const video = el('video');
       const canvas = document.createElement('canvas');
+
       const context = canvas.getContext(
         '2d', { willReadFrequently: true }
       );
@@ -111,9 +123,151 @@
       let generation = 0;
       let timer = null;
       let decoding = false;
+      let link = null;
+      let linkTimer = null;
+
+      const params = new URLSearchParams(
+        location.hash.slice(1)
+      );
+
+      const parentOrigin = params.get('origin');
+      const nonce = params.get('nonce');
+
+      function allowedOrigin(value) {
+        try {
+          const url = new URL(value);
+
+          return url.origin === value &&
+            url.protocol === 'https:' &&
+            (
+              url.hostname === 'script.google.com' ||
+              url.hostname === 'script.googleusercontent.com' ||
+              /^[a-z0-9-]+-script\.googleusercontent\.com$/.test(
+                url.hostname
+              )
+            );
+
+        } catch (error) {
+          return false;
+        }
+      }
+
+      if (
+        parentOrigin &&
+        allowedOrigin(parentOrigin) &&
+        /^[0-9a-f]{64}$/.test(nonce || '') &&
+        window.opener
+      ) {
+        link = {
+          origin: parentOrigin,
+          nonce: nonce,
+          opener: window.opener,
+          connected: false,
+          sent: false,
+          expiresAt: Date.now() + 300000
+        };
+
+        el('connection').textContent =
+          'Connecting to the Google badge check…';
+
+        linkTimer = setTimeout(() => {
+          disconnect(
+            'Connection expired. Open a new scanner from the Google app.'
+          );
+        }, 300000);
+
+      } else if (location.hash) {
+        el('connection').textContent =
+          'Connection unavailable. Open a new scanner from the Google admin app.';
+      }
+
+      // This temporary launch reference contains no badge credential.
+      history.replaceState(
+        null, '', location.pathname + location.search
+      );
+
+      function disconnect(message) {
+        clearTimeout(linkTimer);
+        link = null;
+        el('return').hidden = true;
+        stopCamera();
+        el('connection').textContent = message;
+      }
+
+      function send(type) {
+        link.opener.postMessage({
+          type: type,
+          nonce: link.nonce
+        }, link.origin);
+      }
+
+      window.addEventListener('message', event => {
+        if (
+          !link ||
+          event.origin !== link.origin ||
+          event.source !== link.opener
+        ) {
+          return;
+        }
+
+        const data = event.data;
+
+        if (
+          !data ||
+          typeof data !== 'object' ||
+          Array.isArray(data) ||
+          Object.keys(data).length !== 2 ||
+          data.nonce !== link.nonce
+        ) {
+          return;
+        }
+
+        if (Date.now() >= link.expiresAt) {
+          disconnect(
+            'Connection expired. Open a new scanner from the Google app.'
+          );
+          return;
+        }
+
+        if (
+          data.type === 'HYSC_CONNECT' &&
+          !link.sent
+        ) {
+          link.connected = true;
+          send('HYSC_CONNECTED');
+
+          el('connection').textContent =
+            'Connected to Google. Scan one badge, then return to the Google tab for its result.';
+
+        } else if (
+          data.type === 'HYSC_RECEIVED' &&
+          link.sent
+        ) {
+          clearTimeout(linkTimer);
+
+          el('connection').textContent =
+            'Badge sent to Google. Return to the Google tab to see whether it is current.';
+
+          el('return').hidden = false;
+          el('start').disabled = true;
+          link = null;
+
+        } else if (data.type === 'HYSC_CANCEL') {
+          disconnect(
+            'Camera check cancelled in the Google app.'
+          );
+        }
+      });
+
+      el('return').addEventListener('click', () => {
+        window.close();
+      });
+
+      if (link) send('HYSC_READY');
 
       function clearResult() {
         el('result').hidden = true;
+
         ['resultHeading', 'person', 'details'].forEach(id => {
           el(id).textContent = '';
         });
@@ -133,7 +287,10 @@
         video.srcObject = null;
         video.hidden = true;
         canvas.width = canvas.height = 0;
-        el('start').disabled = !ready || !supported;
+
+        el('start').disabled =
+          !ready || !supported || !!(link && link.sent);
+
         el('stop').disabled = true;
 
         if (message) el('status').textContent = message;
@@ -151,7 +308,9 @@
         }
 
         try {
-          const badge = JSON.parse(raw.slice(prefix.length));
+          const badge = JSON.parse(
+            raw.slice(prefix.length)
+          );
 
           if (
             !badge ||
@@ -191,7 +350,9 @@
           stream &&
           !document.hidden
         ) {
-          timer = setTimeout(() => scanFrame(request), 250);
+          timer = setTimeout(
+            () => scanFrame(request), 250
+          );
         }
       }
 
@@ -241,7 +402,9 @@
           );
 
           const results =
-            await window.ZXingWASM.readBarcodes(pixels, options);
+            await window.ZXingWASM.readBarcodes(
+              pixels, options
+            );
 
           if (
             request !== generation ||
@@ -261,6 +424,31 @@
 
           if (results.length === 1) {
             const id = badgeIdFromText(results[0].text);
+
+            if (
+              id &&
+              link &&
+              link.connected &&
+              !link.sent &&
+              Date.now() < link.expiresAt
+            ) {
+              showResult(
+                'TEST badge read; sending to Google',
+                'Employee ID: ' + id,
+                'Return to the Google badge check tab for verification. Reading alone does not confirm that the badge is current.'
+              );
+
+              link.sent = true;
+              el('start').disabled = true;
+
+              link.opener.postMessage({
+                type: 'HYSC_QR',
+                nonce: link.nonce,
+                qrPayload: results[0].text
+              }, link.origin);
+
+              return;
+            }
 
             showResult(
               id
@@ -303,6 +491,7 @@
         const request = ++generation;
         el('start').disabled = true;
         el('stop').disabled = false;
+
         el('status').textContent =
           'Waiting for camera permission. Choose Allow if asked.';
 
@@ -322,7 +511,9 @@
             request !== generation ||
             document.hidden
           ) {
-            opened.getTracks().forEach(track => track.stop());
+            opened.getTracks().forEach(
+              track => track.stop()
+            );
             return;
           }
 
@@ -331,7 +522,9 @@
           stream.getVideoTracks().forEach(track => {
             track.addEventListener('ended', () => {
               if (request === generation) {
-                stopCamera('Camera disconnected. Try again.');
+                stopCamera(
+                  'Camera disconnected. Try again.'
+                );
               }
             });
           });
@@ -350,7 +543,9 @@
         } catch (error) {
           if (request !== generation) {
             if (opened) {
-              opened.getTracks().forEach(track => track.stop());
+              opened.getTracks().forEach(
+                track => track.stop()
+              );
             }
             return;
           }
@@ -377,6 +572,7 @@
 
       el('clear').addEventListener('click', () => {
         clearResult();
+
         el('status').textContent =
           'Result cleared. Tap Start scanning for another badge.';
       });
@@ -387,6 +583,7 @@
             ? 'Camera stopped. Tap Start scanning when ready.'
             : 'Loading QR reader…'
         );
+
         clearResult();
       }
 
