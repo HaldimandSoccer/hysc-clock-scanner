@@ -44,6 +44,10 @@
       Return to Google badge check
     </button>
 
+    <div class="actions">
+      <button id="cancelTop" class="secondary" type="button" hidden>Cancel badge sign-in and return</button>
+    </div>
+
     <p>
       Keep one complete QR code in view, with some white space
       around it. Hold the badge steady and move it slightly
@@ -63,7 +67,12 @@
       Loading QR reader…
     </p>
 
-    <video id="video" autoplay muted playsinline hidden></video>
+    <section id="camera" tabindex="-1" aria-label="Badge camera" hidden>
+      <video id="video" autoplay muted playsinline hidden></video>
+      <p>Keep one complete badge in view.</p>
+      <button id="cancel" class="secondary" type="button" hidden>Cancel badge sign-in and return</button>
+    </section>
+    <p id="returnHelp" role="status" hidden></p>
 
     <section id="result" tabindex="-1"
              aria-labelledby="resultHeading" hidden>
@@ -82,7 +91,7 @@
       Badge security codes are not displayed or saved.
     </p>
 
-    <p>Version: qr-reader-connected-1</p>
+    <p>Version: qr-reader-connected-2</p>
   </main>
 
   <script
@@ -125,6 +134,9 @@
       let decoding = false;
       let link = null;
       let linkTimer = null;
+      let cancelTimer = null;
+      let terminal = false;
+      let returnWindow = null;
 
       const params = new URLSearchParams(
         location.hash.slice(1)
@@ -167,6 +179,8 @@
           expiresAt: Date.now() + 300000
         };
 
+        returnWindow = link.opener;
+        el('cancelTop').hidden = el('cancel').hidden = false;
         el('connection').textContent =
           'Connecting to the Google badge check…';
 
@@ -188,17 +202,22 @@
 
       function disconnect(message) {
         clearTimeout(linkTimer);
+        clearTimeout(cancelTimer);
+        terminal = true;
         link = null;
-        el('return').hidden = true;
+        el('cancelTop').hidden = el('cancel').hidden = true;
+        el('return').hidden = !returnWindow;
         stopCamera();
         el('connection').textContent = message;
       }
 
       function send(type) {
-        link.opener.postMessage({
-          type: type,
-          nonce: link.nonce
-        }, link.origin);
+        if (!link) return;
+        try {
+          link.opener.postMessage({type: type, nonce: link.nonce}, link.origin);
+        } catch (error) {
+          el('connection').textContent = 'Google could not be reached. Return to Google and use Cancel badge sign-in.';
+        }
       }
 
       window.addEventListener('message', event => {
@@ -231,7 +250,7 @@
 
         if (
           data.type === 'HYSC_CONNECT' &&
-          !link.sent
+          !link.sent && !link.cancelling
         ) {
           link.connected = true;
           send('HYSC_CONNECTED');
@@ -244,14 +263,21 @@
           link.sent
         ) {
           clearTimeout(linkTimer);
+          clearTimeout(cancelTimer);
 
           el('connection').textContent =
             'Badge sent to Google. Return to the Google tab to see whether it is current.';
 
           el('return').hidden = false;
+          terminal = true;
           el('start').disabled = true;
+          el('cancelTop').hidden = el('cancel').hidden = true;
           link = null;
+          returnToGoogle();
 
+        } else if (data.type === 'HYSC_CANCELLED' && link.cancelling) {
+          disconnect('Badge sign-in cancelled in Google. No session was created.');
+          returnToGoogle();
         } else if (data.type === 'HYSC_CANCEL') {
           disconnect(
             'Camera check cancelled in the Google app.'
@@ -259,9 +285,35 @@
         }
       });
 
-      el('return').addEventListener('click', () => {
-        window.close();
-      });
+      function returnToGoogle() {
+        el('return').hidden = false;
+        el('returnHelp').hidden = false;
+        el('returnHelp').textContent = 'If this screen stays open, use Return to Google badge check or the X at the top to return to Google.';
+        el('return').scrollIntoView({block: 'center'});
+        try { if (returnWindow) returnWindow.focus(); } catch (error) { /* Keep the return button. */ }
+        try { window.close(); } catch (error) { /* The embedded browser may require its X button. */ }
+      }
+
+      function cancelSignIn() {
+        if (!link || link.sent || link.cancelling) return;
+        link.cancelling = true;
+        stopCamera('Camera stopped. Asking Google to cancel badge sign-in…');
+        el('cancelTop').disabled = el('cancel').disabled = true;
+        el('connection').textContent = 'Waiting for Google to confirm cancellation…';
+        send('HYSC_SCANNER_CANCEL');
+        cancelTimer = setTimeout(() => {
+          if (!link || !link.cancelling) return;
+          el('connection').textContent = 'Cancellation has not been confirmed. Return to Google and tap Cancel badge sign-in.';
+          el('return').hidden = false;
+          el('returnHelp').hidden = false;
+          el('returnHelp').textContent = 'Use Return to Google badge check or the X at the top. In Google, tap Cancel badge sign-in if it is still waiting.';
+          el('return').scrollIntoView({block: 'center'});
+        }, 4000);
+      }
+
+      el('return').addEventListener('click', returnToGoogle);
+      el('cancelTop').addEventListener('click', cancelSignIn);
+      el('cancel').addEventListener('click', cancelSignIn);
 
       if (link) send('HYSC_READY');
 
@@ -286,10 +338,11 @@
         video.pause();
         video.srcObject = null;
         video.hidden = true;
+        el('camera').hidden = true;
         canvas.width = canvas.height = 0;
 
         el('start').disabled =
-          !ready || !supported || !!(link && link.sent);
+          !ready || !supported || terminal || !!(link && (link.sent || link.cancelling));
 
         el('stop').disabled = true;
 
@@ -440,6 +493,14 @@
 
               link.sent = true;
               el('start').disabled = true;
+              el('cancelTop').hidden = el('cancel').hidden = true;
+              el('return').hidden = false;
+              cancelTimer = setTimeout(() => {
+                if (!link || !link.sent) return;
+                el('connection').textContent = 'Google has not confirmed receipt. Return to Google to check its message. No sign-in is confirmed here.';
+                el('returnHelp').hidden = false;
+                el('returnHelp').textContent = 'Use Return to Google badge check or the X at the top. If Google is still waiting, cancel badge sign-in there and try again.';
+              }, 5000);
 
               link.opener.postMessage({
                 type: 'HYSC_QR',
@@ -531,6 +592,7 @@
 
           video.srcObject = stream;
           video.hidden = false;
+          el('camera').hidden = false;
           await video.play();
 
           if (request !== generation) return;
@@ -538,6 +600,12 @@
           el('status').textContent =
             'Scanning… Hold one complete QR badge in view.';
 
+          el('camera').style.scrollMarginTop = '12px';
+          el('camera').focus({preventScroll: true});
+          el('camera').scrollIntoView({
+            block: 'start',
+            behavior: window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+          });
           schedule(request);
 
         } catch (error) {
@@ -587,7 +655,11 @@
         clearResult();
       }
 
-      window.addEventListener('pagehide', leave);
+      window.addEventListener('pagehide', () => {
+        // Best effort only: iPhone may not deliver a message while closing.
+        if (link && !link.sent && !terminal) send('HYSC_SCANNER_CANCEL');
+        leave();
+      });
 
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) leave();
@@ -613,7 +685,7 @@
           });
 
           ready = true;
-          el('start').disabled = false;
+          el('start').disabled = terminal || !!(link && (link.sent || link.cancelling));
           el('status').textContent =
             'Ready. Tap Start scanning.';
 
