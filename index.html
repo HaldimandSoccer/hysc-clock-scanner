@@ -91,7 +91,7 @@
       Badge security codes are not displayed or saved.
     </p>
 
-    <p>Version: qr-reader-connected-2</p>
+    <p>Version: qr-reader-connected-3</p>
   </main>
 
   <script
@@ -638,18 +638,25 @@
         stopCamera('Camera stopped.');
       });
 
+      function cameraStatus(message) {
+        return terminal || (link && (link.sent || link.cancelling))
+          ? 'Camera stopped. Return to Google badge check to continue.'
+          : message;
+      }
+
       el('clear').addEventListener('click', () => {
         clearResult();
 
-        el('status').textContent =
-          'Result cleared. Tap Start scanning for another badge.';
+        el('status').textContent = cameraStatus(
+          'Result cleared. Tap Start scanning for another badge.'
+        );
       });
 
       function leave() {
         stopCamera(
-          ready
+          cameraStatus(ready
             ? 'Camera stopped. Tap Start scanning when ready.'
-            : 'Loading QR reader…'
+            : 'Loading QR reader…')
         );
 
         clearResult();
@@ -686,13 +693,14 @@
 
           ready = true;
           el('start').disabled = terminal || !!(link && (link.sent || link.cancelling));
-          el('status').textContent =
-            'Ready. Tap Start scanning.';
+          el('status').textContent = cameraStatus(
+            'Ready. Tap Start scanning.'
+          );
 
         } catch (error) {
-          el('status').textContent = supported
+          el('status').textContent = cameraStatus(supported
             ? 'QR reader could not load. Check your internet connection and reload this page.'
-            : 'Camera access requires a supported browser and an HTTPS page. Open the published website directly.';
+            : 'Camera access requires a supported browser and an HTTPS page. Open the published website directly.');
         }
       }
 
